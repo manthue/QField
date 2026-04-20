@@ -17,6 +17,8 @@ concurrency:
 
 env:
   SENTRY_AUTH_TOKEN: ${{ secrets.SENTRY_AUTH_TOKEN }}
+  PLAYSTORE_SIGNINGKEY: ${{ secrets.PLAYSTORE_SIGNINGKEY }}
+  S3CMD_CFG_SECRET: ${{ secrets.S3CMD_CFG }}
 
 jobs:
   build:
@@ -185,7 +187,7 @@ jobs:
           cmake --build "${{ env.CMAKE_BUILD_DIR }}" --config ${{ env.BUILD_TYPE }}
 
       - name: 🔑 Setup signing key
-        if: ${{ secrets.PLAYSTORE_SIGNINGKEY != '' }}
+        if: ${{ env.PLAYSTORE_SIGNINGKEY != '' }}
         env:
           SIGNINGKEY: ${{ secrets.PLAYSTORE_SIGNINGKEY }}
         run: |
@@ -214,7 +216,7 @@ jobs:
             /tmp/${{ env.CI_PACKAGE_NAME }}-${{ env.CI_PACKAGE_FILE_SUFFIX }}-${{ matrix.artifact_name }}-debug.apk
 
       - name: 🍺 Deploy
-        if: ${{ secrets.S3CMD_CFG != '' }}
+        if: ${{ env.S3CMD_CFG_SECRET != '' }}
         run: |
           sudo apt install -y s3cmd
           # This script will rename the artifact and move it to /tmp
@@ -224,7 +226,7 @@ jobs:
 
       - name: Upload release assets
         uses: AButler/upload-release-assets@v3.0
-        if: ${{ github.event_name == 'release' && matrix.all_files_access == 'OFF' && secrets.PLAYSTORE_SIGNINGKEY != '' }}
+        if: ${{ github.event_name == 'release' && matrix.all_files_access == 'OFF' && env.PLAYSTORE_SIGNINGKEY != '' }}
         with:
           files: /tmp/qfield-*.apk
           repo-token: ${{ secrets.GITHUB_TOKEN }}
