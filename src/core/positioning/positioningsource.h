@@ -22,7 +22,9 @@
 
 #include <QCompass>
 #include <QObject>
+#include <QRotationSensor>
 #include <QTimer>
+#include <QTiltSensor>
 
 /**
  * This class connects to GNSS devices (internal or bluetooth NMEA) and provides
@@ -238,6 +240,8 @@ class PositioningSource : public QObject
 
     void lastGnssPositionInformationChanged( const GnssPositionInformation &lastGnssPositionInformation );
     void processCompassReading();
+    void processRotationReading();
+    void processTiltReading();
 
   private:
     void setupDevice();
@@ -262,6 +266,13 @@ class PositioningSource : public QObject
     QCompass mCompass;
     QTimer mCompassTimer;
     double mOrientation = std::numeric_limits<double>::quiet_NaN();
+    QRotationSensor mRotationSensor;
+    QTiltSensor mTiltSensor;
+    QTimer mAttitudeTimer;
+    double mInternalImuRoll = std::numeric_limits<double>::quiet_NaN();
+    double mInternalImuPitch = std::numeric_limits<double>::quiet_NaN();
+    double mInternalImuHeading = std::numeric_limits<double>::quiet_NaN();
+    double mInternalImuSteering = std::numeric_limits<double>::quiet_NaN();
 };
 
 Q_DECLARE_METATYPE( PositioningSource::ElevationCorrectionMode )

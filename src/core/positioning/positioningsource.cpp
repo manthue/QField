@@ -28,9 +28,25 @@
 #include "tcpreceiver.h"
 #include "udpreceiver.h"
 
+#include <cmath>
 #include <QStandardPaths>
 
 QString PositioningSource::backgroundFilePath = QStringLiteral( "%1/positioning.background" ).arg( QStandardPaths::writableLocation( QStandardPaths::AppDataLocation ) );
+
+namespace
+{
+double wrapDegrees360( double angle )
+{
+  if ( std::isnan( angle ) )
+    return angle;
+
+  double wrapped = std::fmod( angle, 360.0 );
+  if ( wrapped < 0.0 )
+    wrapped += 360.0;
+
+  return wrapped;
+}
+}
 
 PositioningSource::PositioningSource( QObject *parent )
   : QObject( parent )
@@ -42,6 +58,11 @@ PositioningSource::PositioningSource( QObject *parent )
   // too many signals
   mCompassTimer.setInterval( 200 );
   connect( &mCompassTimer, &QTimer::timeout, this, &PositioningSource::processCompassReading );
+
+  // Poll internal attitude sensors at the same cadence to populate IMU fields when using the device's sensors.
+  mAttitudeTimer.setInterval( 200 );
+  connect( &mAttitudeTimer, &QTimer::timeout, this, &PositioningSource::processRotationReading );
+  connect( &mAttitudeTimer, &QTimer::timeout, this, &PositioningSource::processTiltReading );
 }
 
 void PositioningSource::setActive( bool active )
@@ -66,6 +87,21 @@ void PositioningSource::setActive( bool active )
       mCompass.setActive( true );
       mCompassTimer.start();
     }
+    if ( mDeviceId.isEmpty() )
+    {
+      if ( !QSensor::sensorsForType( QRotationSensor::sensorType ).isEmpty() )
+      {
+        mRotationSensor.setActive( true );
+      }
+      if ( !QSensor::sensorsForType( QTiltSensor::sensorType ).isEmpty() )
+      {
+        mTiltSensor.setActive( true );
+      }
+      if ( mRotationSensor.isActive() || mTiltSensor.isActive() )
+      {
+        mAttitudeTimer.start();
+      }
+    }
   }
   else
   {
@@ -75,7 +111,14 @@ void PositioningSource::setActive( bool active )
     }
     mCompassTimer.stop();
     mCompass.setActive( false );
+    mAttitudeTimer.stop();
+    mRotationSensor.setActive( false );
+    mTiltSensor.setActive( false );
     mOrientation = std::numeric_limits<double>::quiet_NaN();
+    mInternalImuRoll = std::numeric_limits<double>::quiet_NaN();
+    mInternalImuPitch = std::numeric_limits<double>::quiet_NaN();
+    mInternalImuHeading = std::numeric_limits<double>::quiet_NaN();
+    mInternalImuSteering = std::numeric_limits<double>::quiet_NaN();
     emit orientationChanged();
   }
 
@@ -204,6 +247,11 @@ void PositioningSource::setAntennaHeight( double antennaHeight )
 
 void PositioningSource::setupDevice()
 {
+  mInternalImuRoll = std::numeric_limits<double>::quiet_NaN();
+  mInternalImuPitch = std::numeric_limits<double>::quiet_NaN();
+  mInternalImuHeading = std::numeric_limits<double>::quiet_NaN();
+  mInternalImuSteering = std::numeric_limits<double>::quiet_NaN();
+
   if ( mReceiver )
   {
     mReceiver->disconnectDevice();
@@ -295,8 +343,12 @@ void PositioningSource::setupDevice()
 
 void PositioningSource::lastGnssPositionInformationChanged( const GnssPositionInformation &lastGnssPositionInformation )
 {
-  if ( mPositionInformation == lastGnssPositionInformation )
-    return;
+  const bool useInternalImu = mDeviceId.isEmpty();
+  const double imuRoll = lastGnssPositionInformation.imuRollValid() ? lastGnssPositionInformation.imuRoll() : ( useInternalImu ? mInternalImuRoll : std::numeric_limits<double>::quiet_NaN() );
+  const double imuPitch = lastGnssPositionInformation.imuPitchValid() ? lastGnssPositionInformation.imuPitch() : ( useInternalImu ? mInternalImuPitch : std::numeric_limits<double>::quiet_NaN() );
+  const double imuHeading = lastGnssPositionInformation.imuHeadingValid() ? lastGnssPositionInformation.imuHeading() : ( useInternalImu ? mInternalImuHeading : std::numeric_limits<double>::quiet_NaN() );
+  const double imuSteering = lastGnssPositionInformation.imuSteeringValid() ? lastGnssPositionInformation.imuSteering() : ( useInternalImu ? mInternalImuSteering : std::numeric_limits<double>::quiet_NaN() );
+  const bool imuCorrection = lastGnssPositionInformation.imuCorrection() || ( useInternalImu && ( !std::isnan( imuRoll ) || !std::isnan( imuPitch ) || !std::isnan( imuHeading ) || !std::isnan( imuSteering ) ) );
 
   const GnssPositionInformation positionInformation( lastGnssPositionInformation.latitude(),
                                                      lastGnssPositionInformation.longitude(),
@@ -321,12 +373,16 @@ void PositioningSource::lastGnssPositionInformationChanged( const GnssPositionIn
                                                      lastGnssPositionInformation.magneticVariation(),
                                                      lastGnssPositionInformation.averagedCount(),
                                                      lastGnssPositionInformation.sourceName(),
-                                                     lastGnssPositionInformation.imuCorrection(),
-                                                     lastGnssPositionInformation.imuRoll(),
-                                                     lastGnssPositionInformation.imuPitch(),
-                                                     lastGnssPositionInformation.imuHeading(),
-                                                     lastGnssPositionInformation.imuSteering(),
+                                                     imuCorrection,
+                                                     imuRoll,
+                                                     imuPitch,
+                                                     imuHeading,
+                                                     imuSteering,
                                                      mOrientation );
+
+  if ( mPositionInformation == positionInformation )
+    return;
+
   mPositionInformation = positionInformation;
 
   if ( !mBackgroundMode )
@@ -364,6 +420,48 @@ void PositioningSource::processCompassReading()
         emit orientationChanged();
       }
     }
+  }
+}
+
+void PositioningSource::processRotationReading()
+{
+  if ( !mRotationSensor.isActive() || !mRotationSensor.reading() )
+    return;
+
+  const double roll = mRotationSensor.reading()->y();
+  const double pitch = mRotationSensor.reading()->x();
+  const double heading = wrapDegrees360( mRotationSensor.reading()->z() );
+  const double steering = !std::isnan( mOrientation ) ? mOrientation : heading;
+
+  if ( !qgsDoubleNear( mInternalImuRoll, roll ) )
+    mInternalImuRoll = roll;
+  if ( !qgsDoubleNear( mInternalImuPitch, pitch ) )
+    mInternalImuPitch = pitch;
+  if ( !qgsDoubleNear( mInternalImuHeading, heading ) )
+    mInternalImuHeading = heading;
+  if ( !qgsDoubleNear( mInternalImuSteering, steering ) )
+    mInternalImuSteering = steering;
+
+  if ( mDeviceId.isEmpty() && mPositionInformation.isValid() )
+  {
+    lastGnssPositionInformationChanged( mReceiver ? mReceiver->lastGnssPositionInformation() : GnssPositionInformation() );
+  }
+}
+
+void PositioningSource::processTiltReading()
+{
+  if ( !mTiltSensor.isActive() || !mTiltSensor.reading() )
+    return;
+
+  // Use QTiltSensor only as a fallback when QRotationSensor values are unavailable.
+  if ( std::isnan( mInternalImuPitch ) )
+    mInternalImuPitch = mTiltSensor.reading()->xRotation();
+  if ( std::isnan( mInternalImuRoll ) )
+    mInternalImuRoll = mTiltSensor.reading()->yRotation();
+
+  if ( mDeviceId.isEmpty() && mPositionInformation.isValid() )
+  {
+    lastGnssPositionInformationChanged( mReceiver ? mReceiver->lastGnssPositionInformation() : GnssPositionInformation() );
   }
 }
 
